@@ -4,6 +4,6 @@ Today, I researched best practices for building a standardized CI/CD pipeline th
 
 I plan to structure the reusable CI/CD repo in two phases. The first phase focuses on code quality and validation, including standard software checks that should apply to every agent repo, such as schema validation, linting, type checking, and unit tests. The second phase focuses on RAG quality evaluation, including AI-specific checks such as retrieval evaluation, response quality, and faithfulness.
 
-For the rest of the week, I will be working on that and continue improving CAD Agent based on Nicolas and his team's feedback.
+For the rest of the week, I plan to continue implement this framework and improving CAD Agent based on Nicolas and his team's feedback.
 
 Once the initial setup is in place, I’ll also create a short user manual explaining how to use the CI/CD setup and the reusable repo. I will share it with the AI intern group chat to gather feedback. Please let me know if you'd like to make any changes. Thanks.
