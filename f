@@ -1,0 +1,1 @@
+Here's an updated of what I have worked on today and the plan for this week. Today I research the best practices to build a standardized CI/CD pipeline that could apply to all types of ai agent with the ability to customized the GitLab peipleine/jobs to tailtor to individually needs. and for the rest of the week I'm going to implement code syntax type check
