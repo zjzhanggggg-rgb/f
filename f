@@ -1,451 +1,896 @@
-:::writing{variant=“standard” id=“18427”}
-Build a Stage 1 reusable AI-agent CI eval layer and integrate it into the existing GitLab CI setup without replacing the current basic code-check component. The existing lint, typecheck, and unit test flow stays intact. Your job is to add a small, fast, high-signal eval gate that fits cleanly into the current component-based CI structure. You may choose the best implementation path: adapt the new eval layer to match the current CI conventions, adapt the current CI shape slightly to support the eval layer, or use a hybrid approach. The core functional requirements below are fixed and must not change.
+Here’s the detailed refactor plan.
 
-Goal
+## Executive summary
 
-Create a reusable CI component for AI-agent repos that runs on pushes to main and provides a minimal blocking eval gate for:
-	•	structured output contract validity
-	•	required fields present
-	•	critical regression cases
-	•	RAG faithfulness when applicable
-	•	tool-call correctness when applicable
-	•	runtime safety budgets
+Refactor the universal repo from **input-heavy reusable CI components** into an **Agent AutoCI platform**:
 
-This must be:
-	•	small
-	•	fast
-	•	deterministic where possible
-	•	easy for other teams to adopt
-	•	easy for repos to extend with their own cases later
+* **one tiny include** in each agent repo
+* **runtime discovery** finds code, evals, fixtures, schemas
+* **generated child pipeline** runs only the relevant jobs
+* **repo-local conventions** replace most CI YAML inputs
+* **optional `.ai/agent-ci.yaml`** handles exceptions only
 
-Do not turn this into a full benchmark platform. This is a CI gate, not a research harness.
+This is the right architecture because GitLab **inputs** and **configuration expressions** are resolved before the pipeline runs, so they are not the right place for “smart detection.” Runtime discovery plus a generated child pipeline is the scalable way to get dynamic behavior. GitLab documents both points directly, and this matches the Auto DevOps pattern of automatic project detection with minimal configuration. ([GitLab Docs][1])
 
-Non-negotiable product decisions
+---
 
-These core features must be preserved exactly:
-	1.	Keep the existing code-check CI in place
-	•	lint, typecheck, unit tests already exist
-	•	do not remove or redesign them
-	•	integrate the new eval work into the existing component pattern
-	2.	The most important reusable abstraction is a normalized run artifact plus a declarative assertion engine
-	•	every agent adapter must output the same normalized result shape
-	•	test cases should mostly be data/config, not custom eval code
-	3.	Stage 1 blocking checks are only these
-	•	contract/schema validation
-	•	critical smoke cases
-	•	faithfulness for RAG-tagged cases only
-	•	tool-call correctness for tool-agent-tagged cases only
-	•	runtime budget enforcement
-	4.	This must support optional expansion later
-	•	more cases
-	•	long-context cases
-	•	slower suites
-	•	extra metrics
-	•	but those are non-blocking for stage 1
+# 1. Refactor goals
 
-Required architecture
+## Primary goals
 
-Implement the following reusable pieces.
+* remove most per-repo CI YAML inputs
+* let repo owners keep test cases inside their own repos
+* auto-detect eval locations and sensible defaults
+* preserve one shared core evaluation policy
+* keep PR pipelines fast
+* make failures easy to debug
 
-1. Shared normalized run artifact
+## Non-goals
 
-Define a versioned JSON schema for a single evaluated agent run. Every agent under test must be adapted into this format.
+* do not perfectly infer business policy from arbitrary code
+* do not auto-guess whether citations are product-required unless declared
+* do not force all repos into the exact same folder layout on day 1
 
-Minimum fields:
+---
 
-{
-  "version": "1",
-  "case_id": "string",
-  "status": "success | error | timeout",
-  "final_output": "string",
-  "structured_output": {},
-  "tool_calls": [],
-  "retrieved_contexts": [],
-  "latency_ms": 0,
-  "turn_count": 0,
-  "error": null,
-  "metadata": {}
-}
+# 2. Target architecture
 
-Requirements:
-	•	include a strict schema file
-	•	support missing sections only when logically optional
-	•	final_output must always exist for successful runs, even if empty-string validation later fails
-	•	structured_output should be allowed but optional
-	•	tool_calls must always be an array
-	•	retrieved_contexts must always be an array
-	•	latency_ms and turn_count must always be populated
-	•	status must be explicit
+## New operating model
 
-Also define schemas for nested objects:
-	•	tool call entry
-	•	retrieved context entry
-	•	case definition
+### Shared universal repo owns
 
-2. Declarative case format
+* discovery engine
+* pipeline generator
+* eval runner
+* common checkers
+* artifact contract
+* standard reporting
 
-Create a simple YAML or JSON case definition format. Keep it human-editable.
+### Each agent repo owns
 
-Each case should support:
+* code
+* eval cases
+* fixtures
+* schemas
+* optional local overrides
 
-id: refund_window_rag_001
-tags: [smoke, critical, rag]
-input:
-  messages:
-    - role: user
-      content: "What is the refund window?"
-reference: "30 days"
-retrieved_contexts:
-  - id: doc_12
-    text: "Refunds are allowed within 30 days of purchase."
-expected:
-  assertions:
-    - type: json_schema
-      schema: answer-v1
-    - type: contains_any
-      values: ["30 days", "within 30 days"]
-    - type: faithfulness
-      threshold: 0.9
-  budgets:
-    max_latency_ms: 3000
-    max_turns: 3
-    max_tool_calls: 2
+## Pipeline shape
 
-Case format must support:
-	•	tags
-	•	optional reference answer
-	•	optional retrieved contexts
-	•	optional expected tool calls
-	•	assertions list
-	•	runtime budgets
-	•	optional expected refusal / abstain behavior
+### Parent pipeline
 
-Make the format minimal. Do not add many exotic assertion types in stage 1.
+Runs:
 
-3. Assertion engine
+* existing lint/type/unit tests
+* `discover_agent_repo`
+* `generate_agent_pipeline`
+* `trigger_agent_eval_child`
 
-Build a reusable assertion engine that reads case files and evaluated run artifacts and returns pass/fail per assertion.
+### Child pipeline
 
-Implement only these built-in assertion types for stage 1:
+Runs:
 
-universal
-	•	json_schema
-	•	required_fields_present
-	•	non_empty_final_output
-	•	status_is_success
-	•	exact_match
-	•	contains_any
-	•	regex_match
+* fast smoke evals on merge requests
+* regression suites on default branch or schedule
+* long-context suites only if present
+* optional advisory LLM judge jobs only if enabled
 
-negative / safety behavior
-	•	expect_refusal
-	•	expect_insufficient_info
+GitLab recommends parent-child pipelines for projects with independently defined components, and supports generating child configs from artifacts. ([GitLab Docs][2])
 
-RAG-only
-	•	faithfulness
+---
 
-tool-only
-	•	tool_call_match
+# 3. New repo-consumption UX
 
-No giant plugin system needed yet, but design code so new assertions can be added later without rewriting the runner.
+## What each agent repo should need
 
-4. Runtime budget gate
+### Default case
 
-Implement hard checks for:
-	•	max latency
-	•	max turns
-	•	max tool calls
-	•	optional max output chars
+Only this in `.gitlab-ci.yml`:
 
-This must block failures directly and be fast to evaluate.
+```yaml
+include:
+  - project: your-group/ai-agent-ci
+    file: /templates/bootstrap.yml
+    ref: v2.0.0
+```
 
-5. Agent adapter interface
+GitLab supports reusing configuration this way with `include`, and using project-hosted shared configuration is a standard pattern. ([GitLab Docs][3])
 
-Create a thin adapter contract so each repo can plug in its own agent easily.
+### Optional override file
 
-The eval runner should call a repo-provided adapter command or module that:
-	•	receives a test case input
-	•	runs the agent
-	•	emits the normalized run artifact
+Only for exceptions:
 
-The reusable CI component should not care how the agent is internally implemented.
+```text
+.ai/agent-ci.yaml
+```
 
-Support at least:
-	•	local python module command
-	•	shell command interface
+This file is the escape hatch, not the default integration path.
+
+---
+
+# 4. Convention-over-configuration contract
+
+## Preferred repo layout
+
+```text
+.ai/
+  evals/
+    smoke/
+    regression/
+    long_context/
+  fixtures/
+  schemas/
+  agent-ci.yaml
+```
+
+## Supported fallback layouts
+
+Your discovery engine should also support:
+
+```text
+evals/
+tests/evals/
+qa/evals/
+agent_evals/
+```
+
+## Supported case file patterns
+
+Support these by default:
+
+```text
+*.eval.yaml
+*.eval.yml
+*.case.yaml
+smoke.yaml
+regression.yaml
+cases.yaml
+```
+
+## Supported profile conventions
+
+* `smoke/`
+* `regression/`
+* `long_context/`
+
+This is the key usability move: engineers place files in conventional locations, and the CI platform discovers them automatically.
+
+---
+
+# 5. Discovery engine design
+
+Build a `discover_agent_repo` job that scans the checked-out repo and emits `discovery.json` plus `summary.md`.
+
+## It should detect
+
+### Runtime/language
+
+From:
+
+* `pyproject.toml`
+* `requirements.txt`
+* `poetry.lock`
+* `package.json`
+* `pnpm-lock.yaml`
+* `yarn.lock`
+
+### Candidate entrypoints
+
+Search and score:
+
+* `src/main.py`
+* `app/main.py`
+* `main.py`
+* `src/agent.py`
+* `agent.py`
+* `src/index.ts`
+* `index.ts`
+* `server.ts`
+* `*/agent/*.py`
+* `*/agent/*.ts`
+
+### Eval directories
+
+By precedence:
+
+1. `.ai/evals/`
+2. `evals/`
+3. `tests/evals/`
+4. `qa/evals/`
+5. `agent_evals/`
+
+### Profiles
+
+Detect if these folders exist:
+
+* `smoke`
+* `regression`
+* `long_context`
+
+### Fixtures and schemas
+
+Search:
+
+* `.ai/fixtures/`
+* `.ai/schemas/`
+* `evals/fixtures/`
+* `evals/schemas/`
+* `tests/fixtures/`
+* `schemas/`
+
+### Optional local override file
+
+If present:
+
+* `.ai/agent-ci.yaml`
+
+## Output format
 
 Example:
 
-python -m my_agent.eval_adapter --case path/to/case.yaml --output run.json
+```json
+{
+  "repo_type": "ai_agent",
+  "language": "python",
+  "package_manager": "poetry",
+  "entrypoint_candidates": [
+    {"path": "src/agent.py", "score": 0.93},
+    {"path": "main.py", "score": 0.61}
+  ],
+  "selected_entrypoint": "src/agent.py",
+  "eval_dirs_found": [".ai/evals", "tests/evals"],
+  "selected_eval_dir": ".ai/evals",
+  "profiles_found": ["smoke", "regression"],
+  "case_files": [
+    ".ai/evals/smoke/basic.eval.yaml",
+    ".ai/evals/smoke/happy_path.eval.yaml"
+  ],
+  "fixtures_dir": ".ai/fixtures",
+  "schemas_dir": ".ai/schemas",
+  "override_file": ".ai/agent-ci.yaml"
+}
+```
 
-Stage 1 blocking policy
+## Important rule
 
-Default blocking rules:
-	•	schema / contract pass rate: 100%
-	•	critical smoke cases: 100%
-	•	non-critical smoke overall: configurable, default 90%
-	•	faithfulness threshold applies only to cases tagged rag
-	•	tool call matching applies only to cases tagged tool
-	•	runtime budget failures: 0 allowed
-	•	unhandled agent errors in blocking suites: fail job
+The discovery step should detect **execution shape**, not silently invent evaluation policy.
 
-Use case-level blocking, not only aggregate averages.
+Good to detect:
 
-Important design constraints
+* where files are
+* what runtime is
+* which test profiles exist
 
-Keep it fast
+Not safe to infer automatically:
 
-Target:
-	•	small smoke suite only in blocking CI
-	•	around 10 to 30 cases total by default
-	•	avoid heavy scoring unless tagged and needed
-	•	allow teams to add slower suites outside blocking main CI
+* citation policy
+* required tools
+* which fields are business-critical
+* custom compliance rules
 
-Keep it high-signal
+---
 
-Prioritize:
-	•	contract breakage
-	•	obvious output regressions
-	•	hallucination on insufficient-evidence cases
-	•	broken tool behavior
-	•	runaway latency / looping
+# 6. Local override file design
 
-Keep it reusable
+Use `.ai/agent-ci.yaml` only when discovery or defaults need help.
 
-Teams should mostly add:
-	•	case files
-	•	schemas
-	•	adapter command config
+## Suggested schema
 
-They should not need to write new eval code unless absolutely necessary.
+```yaml
+agent_type: rag           # rag | workflow | structured_generation
+entrypoint: src/agent.py
+eval_dir: .ai/evals
+fixtures_dir: .ai/fixtures
+schemas_dir: .ai/schemas
 
-Minimum repo/module structure to add
+profiles:
+  smoke: true
+  regression: true
+  long_context: false
 
-Fit this into the existing repo structure as naturally as possible, but the eval capability must end up equivalent to this:
+policy:
+  citation_mode: required   # required | optional | forbidden
+  required_tools:
+    - retrieval.search
+  custom_checkers: []
+```
 
-/ci/components/ai-agent-eval/          # reusable GitLab CI component or equivalent folder in your existing pattern
-/evals/schemas/run.schema.json
-/evals/schemas/case.schema.json
-/evals/assertions/
-/evals/runner/
-/evals/examples/smoke/
-/evals/examples/negative/
-/evals/output/                         # artifact output path, gitignored
+## Allowed uses
 
-If the existing repo already has a better location for shared CI component code, reuse that instead.
+* override entrypoint
+* disable a profile
+* set citation policy
+* declare required tools
+* register a custom checker
 
-GitLab CI integration requirements
+## Disallowed uses
 
-You are integrating into an existing component-based GitLab CI setup. Do not invent a parallel CI world.
+* replacing the shared core pipeline
+* bypassing required core checks without explicit platform approval
 
-Required behavior:
-	•	keep current lint/typecheck/unit-test component usage unchanged unless a tiny compatibility adjustment is clearly better
-	•	add a new reusable eval component/stage/job
-	•	make it callable by other repos with a small number of inputs
-	•	publish JUnit XML so failures are visible in GitLab test reports
-	•	upload raw JSON outputs and logs as artifacts
-	•	ensure the job exits non-zero on blocking failures
+---
 
-The reusable component should accept inputs like:
-	•	stage name
-	•	adapter command
-	•	case path / suite path
-	•	tags filter
-	•	threshold profile
-	•	timeout
-	•	optional strict mode
+# 7. Generated child pipeline design
 
-Example desired include style:
+After discovery, generate `generated-config.yml` and trigger it as a child pipeline.
 
-include:
-  - component: $CI_SERVER_FQDN/company/ci/ai-agent-eval@1.0.0
-    inputs:
-      stage: test
-      adapter_cmd: "python -m my_agent.eval_adapter"
-      suite_path: "evals/smoke"
-      tags: "smoke"
-      profile: "default"
+GitLab explicitly supports generating a YAML file in one job and then triggering a child pipeline from that artifact in another job. ([GitLab Docs][4])
 
-You may adjust the exact input names to align with current component conventions.
+## Why this matters
 
-JUnit and artifacts
+This is the clean fix for your original problem.
 
-The runner must output:
-	1.	JUnit XML with one testcase per eval case
-	2.	machine-readable summary JSON
-	3.	per-case normalized run artifact JSON
-	4.	optional human-readable markdown or text summary
+Instead of asking repo owners to predeclare:
 
-The job must fail based on the runner exit code, not because GitLab parsed a failed testcase.
+* where tests are
+* what profile to run
+* what paths to pass as component inputs
 
-Metrics/scoring guidance
+you compute that at runtime, then generate the exact jobs needed.
 
-Contract checks
+## Example generated jobs
 
-Use JSON Schema validation for:
-	•	run artifact
-	•	structured response shape, when provided
-	•	case file shape
+### Merge request
 
-Faithfulness
+Generate only:
 
-Implement for RAG-tagged cases only.
+* `agent_fast_eval`
 
-Behavior:
-	•	only run when retrieved contexts exist or case explicitly marks itself as RAG
-	•	measure whether the answer is supported by provided retrieved context
-	•	make this pluggable behind one assertion type so the backend scorer can be swapped later
-	•	stage 1 can start with a simple implementation if needed, but keep the assertion contract stable
+### Default branch
 
-Tool-call correctness
+Generate:
 
-Implement only for tool-agent-tagged cases.
+* `agent_fast_eval`
+* `agent_regression_eval`
 
-Compare:
-	•	tool name
-	•	required arguments
-	•	optional sequence order strictness
+### Scheduled
 
-Stage 1 can support simple exact matching of a normalized tool call list.
+Generate:
 
-Required initial case packs
+* `agent_fast_eval`
+* `agent_regression_eval`
+* `agent_long_context_eval`
+* optional `agent_advisory_judge_eval`
 
-Create example built-in suites that ship with the reusable system.
+---
 
-1. smoke
+# 8. Core evaluation framework to preserve
 
-Happy path basic regressions:
-	•	exact / contains assertions
-	•	structured output schema checks
-	•	one or two tool call examples
-	•	one or two RAG examples
+Do **not** throw away your original eval logic. Keep it centralized.
 
-2. negative
+OpenAI recommends eval-driven development with task-specific evals and reproducible scoring, and recommends trace grading for workflow-level failures. ([OpenAI Developers][5])
 
-Must include “insufficient evidence” cases.
-These are important and should be treated as first-class.
-Examples:
-	•	missing answer in context
-	•	contradictory or irrelevant context
-	•	expected abstain / “I don’t know”
-	•	tool unavailable / expected graceful failure
+## Must-pass blocking checks
 
-This is one of the highest-value reusable case types. Do not skip it.
+* `schema_valid`
+* `required_fields_present`
+* `forbidden_fields_absent`
+* `no_unresolved_placeholders`
+* `task_relevance`
+* `no_unsupported_factual_claims`
+* `citation_contract_valid` when applicable
+* `required_tool_called` when applicable
+* `tool_args_valid` when applicable
+* `tool_output_consistency` when applicable
+* `max_latency_ms`
+* `max_total_tokens`
+* `max_turns`
+* `max_tool_calls`
 
-3. contract
+## Advisory only
 
-Cases specifically for:
-	•	required fields
-	•	empty output
-	•	malformed structured output
-	•	error propagation
+* `llm_judge` for:
 
-Configurability
+  * helpfulness
+  * completeness
+  * clarity
+  * actionability
 
-Support these extension points for downstream repos:
-	•	add custom case directories
-	•	add tags like slow, long_context, extended
-	•	choose which tags are blocking
-	•	override thresholds via config
-	•	provide custom schemas
-	•	provide repo-local adapter
+This aligns with OpenAI’s guidance to use structured, reproducible evaluations and captured traces rather than relying on vague one-number quality judgments. ([OpenAI Developers][5])
 
-But do not require any of this for basic usage.
+---
 
-Implementation sequencing
+# 9. Test case ownership model
 
-Tell the coding agent to implement in this order:
+Your universal CI repo should use test cases that already live inside each agent repo.
 
-Phase 1: foundation
-	•	inspect current CI component structure and naming conventions
-	•	integrate new eval component into that existing style
-	•	add schemas for run artifact and case file
-	•	add adapter contract
-	•	add minimal runner that executes case files and writes normalized outputs
+## Rule
 
-Phase 2: assertions
-	•	add assertion engine
-	•	implement universal assertions first
-	•	implement runtime budgets
-	•	add JUnit XML output
-	•	add summary JSON output
-	•	fail job correctly on blocking thresholds
+* shared repo owns **runner and grading**
+* agent repo owns **cases and fixtures**
 
-Phase 3: AI-agent-specific checks
-	•	add faithfulness assertion hook for RAG-tagged cases
-	•	add tool-call matching assertion for tool-tagged cases
-	•	add negative insufficient-evidence cases
+This is very close to Auto Test’s philosophy: it uses tests that already exist in the application and automatically detects the stack where possible. ([GitLab Docs][6])
 
-Phase 4: polish
-	•	add example suites
-	•	add README usage docs
-	•	add sample downstream repo integration snippet
-	•	add profile/threshold config
-	•	ensure artifacts and logs are clean and understandable
+## Case format
 
-Required deliverables
+Every case should define semantics, not the pipeline.
 
-Ask the coding agent to produce all of the following:
-	1.	Architecture decision summary
-	•	explain how the new eval layer was integrated into the existing CI/component structure
-	•	explain whether it used adaptation of current CI, adaptation of plan, or hybrid
-	2.	Implementation
-	•	reusable CI component
-	•	eval runner
-	•	assertion engine
-	•	schemas
-	•	sample adapter
-	•	example suites
-	•	JUnit/artifact output
-	3.	Documentation
-	•	how a downstream repo adopts this
-	•	how a repo adds a new case
-	•	how a repo adds RAG cases
-	•	how a repo adds tool-call cases
-	•	how to mark cases as non-blocking or slow
-	4.	A concrete example pipeline snippet
-	•	showing integration with the existing lint/typecheck/unit-test jobs, not replacing them
-	5.	A short rationale for anything intentionally deferred
-	•	long-context
-	•	retrieval precision/recall
-	•	multi-turn memory
-	•	broad rubric scoring
-	•	adversarial suites
-	•	slow research-style evals
+Example:
 
-Explicitly deferred for stage 1
+```yaml
+id: gitlab_issue_summary_basic
+profile: smoke
+agent_type: rag
 
-Do not spend time on:
-	•	retrieval precision / recall benchmarking
-	•	long-context stress suites in blocking CI
-	•	memory evals
-	•	pairwise model comparison
-	•	broad LLM-judge rubric systems
-	•	adversarial red-team packs
-	•	dashboarding platform work
-	•	flaky heuristic-heavy metrics
+input:
+  user: "Summarize issue #123 and explain next step"
 
-These can be designed for later extension but should not delay stage 1.
+fixtures:
+  - fixtures/gitlab/issue_123.json
 
-Definition of done
+contract:
+  output_schema: schemas/issue_summary.v1.json
+  citations: required
+  required_tools:
+    - retrieval.search
 
-This work is done when:
-	•	existing basic code-check CI still works
-	•	the new eval gate runs in CI on main pushes
-	•	the new eval gate is reusable by multiple agent repos
-	•	teams can add cases without writing new framework code
-	•	a broken contract, bad critical response, unsupported RAG answer, wrong critical tool call, or budget regression can fail CI
-	•	output is visible in GitLab test reports and artifacts
-	•	the stage 1 system stays small and understandable
+must_pass:
+  - schema_valid
+  - required_fields_present
+  - task_relevance
+  - no_unsupported_factual_claims
+  - citation_contract_valid
+  - required_tool_called
+  - max_latency_ms
+  - max_total_tokens
+```
 
-Final implementation principle
+The case file should define evaluation semantics. The pipeline should only discover and execute it.
 
-Optimize for:
-	•	minimum complexity
-	•	maximum reuse
-	•	fast feedback
-	•	high-signal failures
-	•	easy downstream self-service
+---
 
-Whenever there is a choice, prefer the design that lets downstream engineers add test cases and schemas instead of framework code.
-:::
+# 10. Artifact contract
+
+Every run should emit the same artifact structure.
+
+```text
+artifacts/<case-id>/
+  response.json
+  trace.jsonl
+  inputs.json
+  grade.json
+  summary.md
+```
+
+## Why
+
+OpenAI’s trace grading guidance is explicit that trace-level evaluation is how you find workflow-level errors and regressions in agent systems. ([OpenAI Developers][7])
+
+## Minimum contents
+
+### `response.json`
+
+Final model output
+
+### `trace.jsonl`
+
+* turns
+* tool calls
+* tool outputs
+* timing
+* token usage
+
+### `grade.json`
+
+Per-check pass/fail with explanations
+
+Example:
+
+```json
+{
+  "case_id": "gitlab_issue_summary_basic",
+  "passed": true,
+  "checks": [
+    {"name": "schema_valid", "passed": true},
+    {"name": "task_relevance", "passed": true},
+    {"name": "citation_contract_valid", "passed": true},
+    {"name": "max_latency_ms", "passed": true, "actual": 3510, "limit": 10000}
+  ]
+}
+```
+
+---
+
+# 11. Detailed implementation phases
+
+## Phase 0: freeze and map current state
+
+### Tasks
+
+* inventory current component inputs
+* identify most common per-repo custom fields
+* group them into:
+
+  * truly necessary
+  * discoverable
+  * legacy clutter
+* map current onboarding pain points
+
+### Deliverables
+
+* input audit doc
+* migration candidate list
+* compatibility matrix
+
+### Exit criteria
+
+* you know which current inputs can be removed
+
+---
+
+## Phase 1: create bootstrap-only integration
+
+### Tasks
+
+* create `/templates/bootstrap.yml`
+* reduce repo integration to one include
+* keep old component path working temporarily
+
+### Deliverables
+
+* bootstrap template
+* migration instructions
+* versioned release tag
+
+### Exit criteria
+
+* a new repo can onboard with one include only
+
+---
+
+## Phase 2: build discovery engine
+
+### Tasks
+
+* implement `discover.py`
+* detect runtime, entrypoint, eval dirs, fixtures, schemas
+* load `.ai/agent-ci.yaml` if present
+* emit `discovery.json`
+* emit human-readable `summary.md`
+
+### Deliverables
+
+* discovery module
+* scoring rules for entrypoint candidates
+* precedence rules for eval directories
+* test suite for discovery logic
+
+### Exit criteria
+
+* discovery works on representative Python and TS agent repos
+
+---
+
+## Phase 3: build pipeline generator
+
+### Tasks
+
+* implement `generate_pipeline.py`
+* convert discovery output into `generated-config.yml`
+* add child pipeline trigger job
+* support MR/default branch/scheduled variants
+
+### Deliverables
+
+* generator module
+* generated child pipeline templates
+* pipeline validation tests
+
+### Exit criteria
+
+* generated child pipeline runs correctly from artifact
+
+---
+
+## Phase 4: standardize repo-local conventions
+
+### Tasks
+
+* publish company convention for `.ai/evals/`
+* support fallback layouts
+* define case file schema
+* define `.ai/agent-ci.yaml` schema
+
+### Deliverables
+
+* case schema
+* override schema
+* quickstart doc
+* migration examples
+
+### Exit criteria
+
+* repo owners know where to place eval files without touching CI YAML
+
+---
+
+## Phase 5: preserve and harden eval core
+
+### Tasks
+
+* centralize built-in checkers
+* keep blocking vs advisory split
+* standardize artifact bundle
+* ensure traces are captured for all supported runners
+
+### Deliverables
+
+* checker library
+* artifact schema
+* reporting format
+* compatibility wrappers for common agent runtimes
+
+### Exit criteria
+
+* all supported repos emit consistent results and artifacts
+
+---
+
+## Phase 6: migration and backward compatibility
+
+### Tasks
+
+* keep old input-heavy interface for a temporary transition window
+* map old inputs into discovery overrides where possible
+* add warnings for deprecated inputs
+* create migration script or doc
+
+### Deliverables
+
+* deprecation plan
+* migration guide
+* compatibility layer
+
+### Exit criteria
+
+* most repos can migrate without custom CI rewrite work
+
+---
+
+## Phase 7: rollout strategy
+
+### Wave 1
+
+* 2–3 representative repos:
+
+  * one RAG repo
+  * one workflow/tool repo
+  * one structured generation repo
+
+### Wave 2
+
+* 10 repos with mixed languages and layouts
+
+### Wave 3
+
+* company-wide default onboarding path
+
+### Success metrics
+
+* median per-repo integration time
+* number of CI inputs required per repo
+* percent of repos needing override file
+* percent of repos needing manual intervention
+* MR pipeline duration
+* eval failure explainability
+
+---
+
+# 12. Discovery rules you should implement
+
+## Eval dir precedence
+
+1. `.ai/evals/`
+2. `evals/`
+3. `tests/evals/`
+4. `qa/evals/`
+5. `agent_evals/`
+
+## File inclusion rules
+
+Include:
+
+* `*.eval.yaml`
+* `*.eval.yml`
+* `*.case.yaml`
+* files under `smoke/`, `regression/`, `long_context/`
+
+Ignore:
+
+* `archive/`
+* `deprecated/`
+* `old/`
+* hidden temp directories
+* generated files
+
+## Profile selection
+
+### Merge requests
+
+Run only:
+
+* `smoke`
+
+### Default branch
+
+Run:
+
+* `smoke`
+* `regression`
+
+### Scheduled
+
+Run:
+
+* `smoke`
+* `regression`
+* `long_context`
+* advisory judge if configured
+
+GitLab pipelines naturally support different execution modes for push, merge request, and schedule events. ([GitLab Docs][3])
+
+---
+
+# 13. Failure behavior
+
+## If no evals are found
+
+Choose one policy:
+
+### Recommended
+
+* if repo clearly looks like an AI repo, warn first for transition period, then fail later
+* if repo does not look like an AI repo, noop the agent eval stage
+
+## If multiple candidate entrypoints are found
+
+* choose highest score
+* write full ranking to `summary.md`
+* allow override in `.ai/agent-ci.yaml`
+
+## If discovery is ambiguous
+
+* fail with actionable message
+* print:
+
+  * candidate eval dirs
+  * candidate entrypoints
+  * expected override file example
+
+This matters because discoverability failures are the main risk in a convention-over-configuration system.
+
+---
+
+# 14. Repo structure for the universal CI repo
+
+```text
+ai-agent-ci/
+  templates/
+    bootstrap.yml
+    child-base.yml
+
+  discover/
+    discover.py
+    rules.py
+    scoring.py
+
+  generator/
+    generate_pipeline.py
+    templates/
+
+  runner/
+    run_eval.py
+
+  checkers/
+    schema_valid.py
+    required_fields_present.py
+    forbidden_fields_absent.py
+    no_unresolved_placeholders.py
+    task_relevance.py
+    no_unsupported_factual_claims.py
+    citation_contract_valid.py
+    required_tool_called.py
+    tool_args_valid.py
+    tool_output_consistency.py
+    budgets.py
+    llm_judge.py
+
+  schemas/
+    case.schema.json
+    override.schema.json
+    discovery.schema.json
+    grade.schema.json
+    trace.schema.json
+
+  docs/
+    quickstart.md
+    migration.md
+    conventions.md
+```
+
+---
+
+# 15. Acceptance criteria for the refactor
+
+The refactor is done when:
+
+* a new repo can onboard with **one include**
+* most repos need **zero custom CI inputs**
+* test cases are auto-discovered from supported locations
+* an optional `.ai/agent-ci.yaml` handles edge cases
+* child pipelines are generated from runtime discovery
+* the original evaluation core still runs consistently
+* MR pipelines stay fast
+* results are emitted in a standard artifact bundle
+* discovery failures are explainable in `summary.md`
+
+---
+
+# 16. What to tell your AI agent to build first
+
+Tell it to implement in this order:
+
+### Step 1
+
+Create `bootstrap.yml` with:
+
+* `discover_agent_repo`
+* `generate_agent_pipeline`
+* `trigger_agent_eval_child`
+
+### Step 2
+
+Build `discover.py` with:
+
+* eval dir detection
+* profile detection
+* fixture/schema detection
+* entrypoint scoring
+* optional `.ai/agent-ci.yaml` loading
+
+### Step 3
+
+Build `generate_pipeline.py` that:
+
+* reads `discovery.json`
+* emits `generated-config.yml`
+* creates only relevant jobs by pipeline type
+
+### Step 4
+
+Wire the existing eval runner into the child pipeline
+
+### Step 5
+
+Add standard artifacts:
+
+* `discovery.json`
+* `summary.md`
+* `grade.json`
+* `trace.jsonl`
+
+### Step 6
+
+Pilot on 3 repos before broad rollout
+
+---
+
+# 17. Final recommendation
+
+The best refactor is:
+
+**keep your original evaluation core**
+but change the integration model to:
+
+**thin include + runtime discovery + generated child pipeline + optional local override file**
+
+That is the most scalable, lowest-friction, professionally correct way to run a company-wide AI agent CI/CD platform on GitLab. It matches GitLab’s strengths around reusable configs, runtime jobs, artifacts, and child pipelines, and it matches OpenAI’s recommendation to build reproducible, trace-backed eval systems with focused, task-specific checks. ([GitLab Docs][4])
+
+I can turn this into a copy-paste implementation spec next.
+
+[1]: https://docs.gitlab.com/ci/inputs/?utm_source=chatgpt.com "CI/CD inputs | GitLab Docs"
+[2]: https://docs.gitlab.com/ci/pipelines/pipeline_architectures/?utm_source=chatgpt.com "Pipeline architecture | GitLab Docs"
+[3]: https://docs.gitlab.com/ci/pipelines/?utm_source=chatgpt.com "CI/CD pipelines | GitLab Docs"
+[4]: https://docs.gitlab.com/ci/pipelines/downstream_pipelines/?utm_source=chatgpt.com "Downstream pipelines | GitLab Docs"
+[5]: https://developers.openai.com/api/docs/guides/evaluation-best-practices?utm_source=chatgpt.com "Evaluation best practices | OpenAI API"
+[6]: https://docs.gitlab.com/topics/autodevops/stages/?utm_source=chatgpt.com "Stages of Auto DevOps | GitLab Docs"
+[7]: https://developers.openai.com/api/docs/guides/trace-grading?utm_source=chatgpt.com "Trace grading | OpenAI API"
