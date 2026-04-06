@@ -1,3 +1,7 @@
+
+
+ust push the code to gitlab as it is and the gitlad pipeline can efficently input custom value, find where the main code is, where test cases are so it automatically adjust small things to fit the code but preserve main core peipleines
+
 Here’s the detailed refactor plan.
 
 ## Executive summary
