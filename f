@@ -1,8 +1,200 @@
 
+Let me re-read the current templates and consumer repo to make the plan maximally specific — exact lines to change, exact defaults to set.   
 
-ust push the code to gitlab as it is and the gitlad pipeline can efficently input custom value, find where the main code is, where test cases are so it automatically adjust small things to fit the code but preserve main core peipleines
+Read [](file:///home/zijing.zhang/ci.cd%20folder/ci.cd/templates/agent-standard-foundation/template.yml#1-1), lines 1 to 60
 
-Here’s the detailed refactor plan.
+Read [](file:///home/zijing.zhang/ci.cd%20folder/ci.cd/README.md#1-1), lines 1 to 200
+
+Read [](file:///home/zijing.zhang/ci.cd%20folder/ci.cd/examples/gitlab-ci-minimal.yml)
+
+Read [](file:///home/zijing.zhang/ci.cd%20folder/ci.cd/scripts)
+
+Read [](file:///home/zijing.zhang/ci.cd%20folder/ci.cd/README.md#200-200), lines 200 to 389
+
+Read [](file:///home/zijing.zhang/ci.cd%20folder/ci.cd/scripts/check_required_files.py)
+
+Read [](file:///home/zijing.zhang/ci.cd%20folder/ci.cd/.gitlab-ci.yml)
+
+Now I have full context on every file. Let me write the detailed plan. 
+
+Deleted memory [](file:///home/zijing.zhang/.vscode-server/data/User/workspaceStorage/8b80902ce3f376391853bf8a0fa57d5b/GitHub.copilot-chat/memory-tool/memories/OWZmNWYwZGQtMWY1OC00YWNkLThmYjEtYjVkMzkxN2Y5N2Y3/plan.md)
+
+Created memory file [](file:///home/zijing.zhang/.vscode-server/data/User/workspaceStorage/8b80902ce3f376391853bf8a0fa57d5b/GitHub.copilot-chat/memory-tool/memories/OWZmNWYwZGQtMWY1OC00YWNkLThmYjEtYjVkMzkxN2Y5N2Y3/plan.md)
+
+Here's the full detailed plan:
+
+---
+
+## Plan: Streamline Explicit CI Components + Add Scaffold Helper
+
+Keep the explicit GitLab component model (no runtime auto-discovery), but reduce onboarding friction by removing dead inputs, improving defaults, adding a local scaffold script, and expanding examples. The result: most repos go from ~10 inputs down to 2-3.
+
+**Before (current gitlab-ai-agent):**
+```yaml
+include:
+  - component: .../agent-standard-foundation@1.0.0
+    inputs:
+      source_path: "app"
+      test_path: "app/tests/"
+      requirements_file: "requirements.txt"     # matches default — unnecessary
+      required_files: "requirements.txt"         # matches default — unnecessary
+      run_ruff: "true"                           # matches default — unnecessary
+      run_ruff_format: "true"                    # matches default — unnecessary
+      mypy_args: "--ignore-missing-imports --config-file pyproject.toml"
+      pytest_args: "-v --tb=short -m 'not rag' --ignore=app/tests/rag"
+      coverage_enabled: "true"                   # should be default — unnecessary
+```
+
+**After (v2.0.0):**
+```yaml
+include:
+  - component: .../agent-standard-foundation@2.0.0
+    inputs:
+      source_path: "app"
+      test_path: "app/tests/"
+      mypy_args: "--ignore-missing-imports --config-file pyproject.toml"
+      pytest_args: "-v --tb=short -m 'not rag' --ignore=app/tests/rag"
+```
+
+10 inputs → 4 inputs. The remaining 4 are genuinely repo-specific and can't be defaulted.
+
+---
+
+### Phase 1: Clean Foundation Template Interface
+
+**Step 1** — Remove 3 deprecated no-op inputs from template.yml: `agent_config_path`, `check_schema`, `eval_config_path`. These do nothing but confuse new users scanning the input list. This is a breaking change → tag as **v2.0.0**.
+
+**Step 2** — Improve defaults in the same file:
+- `image`: `"python:3.11-slim"` → `"registry.monolithicpower.com/ai-platform/ci-images/agent-ci:latest"` (every consumer uses this anyway)
+- `coverage_enabled`: `"false"` → `"true"` (every consumer enables it; coverage-off becomes the opt-in)
+- All other defaults stay — they're already correct
+
+**Step 3** — Auto-follow `coverage_source` from `source_path`. In the template.yml, when `coverage_source` is `"."` (the default, meaning user didn't override), substitute `source_path` instead. This eliminates the need to specify `coverage_source` separately:
+```bash
+COV_SRC="$[[ inputs.coverage_source ]]"
+if [ "$COV_SRC" = "." ]; then COV_SRC="$[[ inputs.source_path ]]"; fi
+```
+
+---
+
+### Phase 2: Local Scaffold Helper
+
+**Step 4** — Create `scripts/scaffold.py` (~200 lines, stdlib + pyyaml). A script repo owners run **locally once** to generate a recommended .gitlab-ci.yml:
+```bash
+cd my-agent-repo
+python /path/to/ci.cd/scripts/scaffold.py
+```
+
+It prints a ready-to-commit .gitlab-ci.yml to stdout with comments explaining each detected value. Detection logic:
+
+| What | How it detects |
+|---|---|
+| Source path | `pyproject.toml [tool.ruff].src` → dirs with `__init__.py` (`app/`, `src/`, `lib/`) → fallback `.` |
+| Test path | `pyproject.toml [tool.pytest.ini_options].testpaths` → scan `tests/`, `test/`, `app/tests/` → glob `test_*.py` |
+| Pytest args | Read `pyproject.toml` markers → if `rag`/`integration`/`e2e` markers exist, add `-m 'not ...'` |
+| Mypy args | If `pyproject.toml` has `[tool.mypy]`, add `--config-file pyproject.toml` |
+| Eval | If `evals/` dir has `.yaml` case files + adapter in `evals/adapters/`, suggest `ai-agent-eval` include |
+
+This is **advisory only** — the developer reviews, edits, and commits. No runtime magic.
+
+**Step 5** — Add `--check` mode: `scaffold.py --check` compares its suggestion against an existing .gitlab-ci.yml and prints a diff. Useful for "am I missing something?" audits.
+
+---
+
+### Phase 3: Expand Examples
+
+**Step 6** — Create `examples/gitlab-ci-app-layout.yml` for repos with `app/` source layout (like gitlab-ai-agent). *parallel with step 2*
+
+**Step 7** — Update existing examples to v2.0.0 defaults:
+- examples/gitlab-ci-minimal.yml — update tag
+- examples/gitlab-ci-foundation.yml — remove deprecated inputs, reduce to only non-default values
+- examples/gitlab-ci-individual.yml — update tag
+
+---
+
+### Phase 4: README Improvements
+
+**Step 8** — Add a "Common Recipes" section to README.md after the Quick Start: *depends on step 2*
+
+| Recipe | What to set |
+|---|---|
+| Code in `app/`, tests in `app/tests/` | `source_path: "app"`, `test_path: "app/tests/"` |
+| Skip heavy tests (rag, integration) | `pytest_args: "-v -m 'not rag and not integration'"` |
+| Use pyproject.toml for mypy | `mypy_args: "--ignore-missing-imports --config-file pyproject.toml"` |
+| Disable unit tests | `run_unit_test: "false"` |
+| Custom test deps | `test_requirements_file: "requirements-dev.txt"` |
+
+**Step 9** — Add "Scaffold helper" section documenting `scaffold.py`. *depends on step 4*
+
+**Step 10** — Update input reference tables: remove deprecated inputs from foundation table, add v1→v2 migration note.
+
+---
+
+### Phase 5: Version Bump + Migration
+
+**Step 11** — Tag as **v2.0.0** after all template/example/doc changes land.
+
+**Step 12** — Add "Migrating from v1 to v2" in README:
+- Remove `agent_config_path`, `check_schema`, `eval_config_path` inputs
+- Remove `image` input if you were using the registry image (now default)
+- Remove `coverage_enabled: "true"` (now default)
+- Remove `coverage_source` if it matches `source_path` (now auto-follows)
+
+**Step 13** — Update .gitlab-ci.yml as the reference consumer migration. *depends on step 11*
+
+---
+
+### Phase 6: Tests
+
+**Step 14** — Create `tests/test_scaffold.py` with scenarios using `tmp_path`:
+- `src/` layout → correct detection
+- `app/` layout (like gitlab-ai-agent) → `source_path=app`, `test_path=app/tests/`
+- No tests dir → `run_unit_test=false`
+- `pyproject.toml` with pytest markers → marker exclusions in `pytest_args`
+- `pyproject.toml` with mypy config → `--config-file` in `mypy_args`
+- `evals/` with cases + adapter → eval include suggested
+- `evals/` with cases, no adapter → TODO comment
+- `--check` mode: matching file → no diff; outdated file → shows diff
+
+---
+
+### Relevant Files
+
+| Action | File |
+|---|---|
+| **Modify** | templates/agent-standard-foundation/template.yml — remove 3 deprecated inputs, change image/coverage defaults, auto-follow coverage_source |
+| **Create** | `scripts/scaffold.py` — local helper (scan repo → print .gitlab-ci.yml) |
+| **Create** | `examples/gitlab-ci-app-layout.yml` — example for app/ layout |
+| **Create** | `tests/test_scaffold.py` — scaffold unit tests |
+| **Modify** | examples/gitlab-ci-minimal.yml — update tag |
+| **Modify** | examples/gitlab-ci-foundation.yml — slim down, update tag |
+| **Modify** | examples/gitlab-ci-individual.yml — update tag |
+| **Modify** | README.md — recipes, scaffold docs, migration guide |
+| **No change** | All other templates (`validate-config`, `lint`, `typecheck`, `unit-test`, `ai-agent-eval`) |
+| **No change** | All `evals/` code |
+| **No change** | .gitlab-ci.yml (root) — already validates new template via glob |
+
+---
+
+### Verification
+
+1. Root CI validation job passes after template cleanup (template still parses valid YAML)
+2. `pytest tests/test_scaffold.py` — all 9 scenarios pass
+3. Run `scaffold.py` against gitlab-ai-agent repo — output matches the expected 4-input v2.0.0 config
+4. gitlab-ai-agent pipeline passes with v2.0.0 include (fewer inputs, same behavior)
+5. Minimal example (zero inputs) produces a working pipeline for `src/` + `tests/` layout
+
+---
+
+### Decisions
+
+- **v2.0.0 major bump** — removing inputs is a breaking change; clean cut is better than lingering deprecation
+- **Default image to registry image** — every real consumer uses it; generic `python:3.11-slim` was a wrong default
+- **Default coverage to true** — every consumer enables it; opt-out is the rare case
+- **Scaffold is local-only** — never runs in CI; the .gitlab-ci.yml is always the single source of truth
+- **No runtime auto-discovery** — explicit config stays; debugging remains transparent
+- **Individual component templates unchanged** — only foundation gets opinionated defaults
+- **Eval stays explicit** — scaffold may suggest it, but user commits the include deliberately
 
 ## Executive summary
 
